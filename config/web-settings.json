@@ -1,0 +1,17 @@
+{
+  "ear_closed_threshold": 0.21,
+  "ear_open_threshold": 0.28,
+  "min_eye_closure_duration": 0.2,
+  "sleep_alert_cooldown": 0,
+  "require_both_eyes": true,
+  "blink_threshold": 0.55,
+  "use_adaptive_threshold": true,
+  "adaptive_ratio": 0.62,
+  "phone_confidence_threshold": 0.4,
+  "min_phone_detection_duration": 1.5,
+  "phone_alert_cooldown": 30,
+  "phone_detection_interval": 500,
+  "detection_size": 320,
+  "sleep_audio": "sleep_alert.mp3",
+  "phone_audio": "phone_alert.mp3"
+}
