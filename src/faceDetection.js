@@ -4,10 +4,10 @@
 // Aspect Ratio (EAR) for both eyes and read the "eyeBlink" blendshape,
 // which is a well calibrated second signal for closed eyes.
 import { FaceLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
+import { backendAssetBase, initBackend } from "./backend.js";
 
 const LEFT_EYE_IDS = [33, 160, 158, 133, 153, 144];
 const RIGHT_EYE_IDS = [362, 385, 387, 263, 373, 380];
-const MODEL_BASE = (import.meta.env.VITE_MODEL_BASE_URL || "").replace(/\/$/, "");
 
 function distance(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y);
@@ -25,9 +25,11 @@ let landmarkerPromise = null;
 export function loadFaceLandmarker() {
   if (!landmarkerPromise) {
     landmarkerPromise = (async () => {
+      await initBackend();
+      const modelBase = (import.meta.env.VITE_MODEL_BASE_URL || backendAssetBase()).replace(/\/$/, "");
       const vision = await FilesetResolver.forVisionTasks("/wasm");
       return FaceLandmarker.createFromOptions(vision, {
-        baseOptions: { modelAssetPath: `${MODEL_BASE}/models/face_landmarker.task` },
+        baseOptions: { modelAssetPath: `${modelBase}/models/face_landmarker.task` },
         runningMode: "VIDEO",
         numFaces: 1,
         outputFaceBlendshapes: true,

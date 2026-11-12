@@ -1,0 +1,4 @@
+{
+  "apiBaseUrl": "https://studytracker-si7m.onrender.com",
+  "wsUrl": "wss://studytracker-si7m.onrender.com/ws"
+}

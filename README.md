@@ -47,12 +47,18 @@ npm test           # Camera/detection/WebSocket self-test (requires a camera)
 
 ## Using the dashboard
 
-1. Select a laptop/USB webcam, RTSP camera, or local video file.
-2. Enter the camera index, device name, RTSP URL, or file path.
+1. Select the camera source:
+   - **Browser camera (this device)** – captures the camera of the computer that runs the browser and streams the frames to the server. This is the only option that works when the backend runs on a hosted server such as Render.
+   - **Laptop / USB webcam (server)** – the server opens a camera that is physically attached to it. Only useful when the Node server runs on the same machine as the camera.
+   - **IP camera (RTSP)** – the server pulls the stream from an RTSP camera.
+   - **Video file (test)** – the server loops a local video file.
+2. Enter the camera index, device name, RTSP URL, or file path where required.
 3. Select **Connect Camera**.
 4. Use **Start/Stop Monitoring** to pause or resume browser-side eye detection.
 5. Use **Apply Settings** to save detection settings to `config/web-settings.json`.
 6. Use the audio panel to upload and test alert sounds.
+
+The browser camera requires a secure context: `https://` or `http://localhost`. The browser asks for camera permission the first time it is used.
 
 RTSP URLs normally look like `rtsp://192.168.1.100:554/stream1`. Credentials entered in the dashboard are URL-encoded before being passed to FFmpeg.
 
@@ -81,6 +87,7 @@ study_tracker/
 ├── index.html
 ├── src/                      # React dashboard and browser MediaPipe detection
 ├── server/                   # Express, WebSocket, FFmpeg, and ONNX Runtime backend
+├── public/backend.json       # Runtime backend URL for split deployments
 ├── public/wasm/              # MediaPipe browser runtime copied during npm install
 ├── models/
 │   ├── face_landmarker.task  # Browser MediaPipe model
@@ -95,6 +102,23 @@ study_tracker/
 
 The browser and server communicate through REST endpoints under `/api` and a WebSocket at `/ws`. The frontend can be hosted on Vercel while the persistent Node backend runs on Render, but the frontend must be given the backend URLs.
 
+### Backend URL configuration
+
+The frontend resolves the backend in this order:
+
+1. `VITE_API_BASE_URL` and `VITE_WS_BASE_URL` build-time variables.
+2. `public/backend.json`, which is copied to `dist/backend.json` and read at runtime. Change this file to point the frontend at a different backend without rebuilding the environment variables.
+3. The current origin, which is correct when the frontend and backend are served by the same host.
+
+```json
+{
+  "apiBaseUrl": "https://studytracker-si7m.onrender.com",
+  "wsUrl": "wss://studytracker-si7m.onrender.com/ws"
+}
+```
+
+`VITE_MODEL_BASE_URL` overrides only the location of `models/face_landmarker.task`; when it is not set, the model is loaded from the backend URL.
+
 ### Vercel: frontend deployment
 
 1. Push the cleaned repository to GitHub.
@@ -104,7 +128,7 @@ The browser and server communicate through REST endpoints under `/api` and a Web
    - Install command: `npm install`
    - Build command: `npm run build`
    - Output directory: `dist`
-5. Add environment variables if the backend is hosted separately:
+5. Either set the environment variables or edit `public/backend.json`:
    - `VITE_API_BASE_URL=https://your-render-service.onrender.com`
    - `VITE_WS_BASE_URL=wss://your-render-service.onrender.com/ws`
    - `VITE_MODEL_BASE_URL=https://your-render-service.onrender.com`
@@ -121,13 +145,13 @@ To serve the complete application from one domain:
    - Runtime: Node
    - Build command: `npm ci && npm run build`
    - Start command: `npm start`
-3. Add `ALLOWED_ORIGINS` with the frontend origin when the frontend is on Vercel, for example `https://your-project.vercel.app`. Multiple origins can be comma-separated.
+3. Optionally set `ALLOWED_ORIGINS` with the frontend origin when the frontend is on Vercel, for example `https://your-project.vercel.app`. Multiple origins can be comma-separated. When it is not set, the API accepts any origin so a split deployment works out of the box.
 4. Deploy and use the generated `https://your-render-service.onrender.com` URL.
-5. If Vercel hosts the frontend, set the three `VITE_*` variables in Vercel using the Render URL.
+5. If Vercel hosts the frontend, set the three `VITE_*` variables in Vercel or update `public/backend.json` with the Render URL.
 
 When the frontend and backend share the Render domain, no `VITE_*` variables are needed. The Node server serves the built frontend from `dist/` and handles `/api`, `/ws`, `/models`, and `/assets` on the same origin.
 
-A Render-hosted backend can access reachable RTSP cameras and test videos stored on its filesystem. It cannot directly access a webcam attached to the user's laptop; use the local Node server for laptop/USB webcam monitoring.
+A Render-hosted backend cannot access a webcam attached to the user's laptop. Use the **Browser camera** source, which captures the frame in the browser and posts it to the backend for detection, or run the Node server locally to capture a server-side webcam.
 
 ## Important model and asset behavior
 

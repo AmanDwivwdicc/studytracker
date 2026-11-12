@@ -1,11 +1,9 @@
 // Small helper around the REST API of the Study Tracker server.
-const API_BASE = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
-const API = `${API_BASE}/api`;
-
-export const assetBaseUrl = API_BASE;
+import { backendAssetBase, backendBase, backendWsUrl, initBackend } from "./backend.js";
 
 async function request(path, options = {}) {
-  const response = await fetch(`${API}${path}`, {
+  await initBackend();
+  const response = await fetch(`${backendBase()}/api${path}`, {
     headers: { "Content-Type": "application/json" },
     ...options,
   });
@@ -29,12 +27,24 @@ export const api = {
     request("/settings", { method: "PUT", body: JSON.stringify(settings) }),
   addCamera: (payload) => request("/cameras", { method: "POST", body: JSON.stringify(payload) }),
   removeCamera: (id) => request(`/cameras/${id}`, { method: "DELETE" }),
+  pushFrame: async (id, blob) => {
+    await initBackend();
+    const response = await fetch(`${backendBase()}/api/cameras/${encodeURIComponent(id)}/frame`, {
+      method: "POST",
+      headers: { "Content-Type": blob.type || "image/jpeg" },
+      body: blob,
+    });
+    if (!response.ok) throw new Error("Could not send the frame to the server");
+    return response.json();
+  },
+  capabilities: () => request("/capabilities"),
   webcams: () => request("/webcams"),
   alerts: () => request("/alerts"),
   clearAlerts: () => request("/alerts", { method: "DELETE" }),
   audio: () => request("/audio"),
   uploadAudio: async (name, file) => {
-    const response = await fetch(`${API}/audio/${encodeURIComponent(name)}`, {
+    await initBackend();
+    const response = await fetch(`${backendBase()}/api/audio/${encodeURIComponent(name)}`, {
       method: "POST",
       headers: { "Content-Type": file.type || "application/octet-stream" },
       body: await file.arrayBuffer(),
@@ -43,3 +53,12 @@ export const api = {
     return response.json();
   },
 };
+
+export async function assetUrl(name) {
+  await initBackend();
+  return `${backendAssetBase()}/assets/${encodeURIComponent(name)}`;
+}
+
+export const apiBaseUrl = backendBase;
+export const wsBaseUrl = backendWsUrl;
+export { initBackend };

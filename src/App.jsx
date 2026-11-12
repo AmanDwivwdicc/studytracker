@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { api, assetBaseUrl } from "./api.js";
+import { api, assetUrl, initBackend } from "./api.js";
+import { backendWsUrl } from "./backend.js";
 import { loadFaceLandmarker, SleepTracker } from "./faceDetection.js";
 
 const LEVEL_COLOR = { green: "#3cc85a", yellow: "#f2c744", red: "#f23c3c" };
@@ -22,10 +23,11 @@ function useWebSocket(onMessage) {
     let closed = false;
     let retry;
 
-    const connect = () => {
-      const configuredUrl = import.meta.env.VITE_WS_BASE_URL;
-      const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-      const socketUrl = configuredUrl || `${protocol}://${window.location.host}/ws`;
+    const connect = async () => {
+      await initBackend();
+      if (closed) return;
+      const socketUrl = backendWsUrl();
+      if (!socketUrl) return;
       const socket = new WebSocket(socketUrl);
       socket.binaryType = "arraybuffer";
       socket.onmessage = (event) => {
@@ -67,7 +69,7 @@ export default function App() {
   const [eyeStatus, setEyeStatus] = useState({});
   const [statusMsg, setStatusMsg] = useState("");
   const [monitoring, setMonitoring] = useState(true);
-  const [sourceType, setSourceType] = useState("webcam");
+  const [sourceType, setSourceType] = useState("browser");
   const [sourceValue, setSourceValue] = useState("0");
   const [sourceName, setSourceName] = useState("");
   const [username, setUsername] = useState("");
@@ -95,29 +97,49 @@ export default function App() {
   phoneBoxesRef.current = phoneBoxes;
 
   // ------------------------------------------------------------- bootstrap
+  const [bootError, setBootError] = useState("");
+  const [retryCount, setRetryCount] = useState(0);
+
   useEffect(() => {
-    api.state()
-      .then((state) => {
+    let cancelled = false;
+    setBootError("");
+    (async () => {
+      try {
+        await initBackend();
+        const state = await api.state();
+        if (cancelled) return;
         setSettings(state.settings);
         setCameras(state.cameras);
         setAlerts(state.alerts || []);
         setAudioFiles(state.audio.files || []);
-      })
-      .catch((err) => setStatusMsg(`Cannot reach the server: ${err.message}`));
-    api.webcams()
-      .then((data) => setWebcams(data.devices || []))
-      .catch(() => setWebcams([]));
-    loadFaceLandmarker()
-      .then((landmarker) => (landmarkerRef.current = landmarker))
-      .catch((err) => setStatusMsg(`MediaPipe could not be loaded: ${err.message}`));
-  }, []);
+      } catch (err) {
+        if (cancelled) return;
+        setBootError(err.message || "The backend is not reachable.");
+      }
+      try {
+        const data = await api.webcams();
+        if (!cancelled) setWebcams(data.devices || []);
+      } catch {
+        if (!cancelled) setWebcams([]);
+      }
+      try {
+        const landmarker = await loadFaceLandmarker();
+        if (!cancelled) landmarkerRef.current = landmarker;
+      } catch (err) {
+        if (!cancelled) setStatusMsg(`MediaPipe could not be loaded: ${err.message}`);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [retryCount]);
 
   // --------------------------------------------------------------- audio
-  const playFile = useCallback((name) => {
+  const playFile = useCallback(async (name) => {
     if (!name) return;
     let audio = audioRef.current.get(name);
     if (!audio) {
-      audio = new Audio(`${assetBaseUrl}/assets/${encodeURIComponent(name)}`);
+      audio = new Audio(await assetUrl(name));
       audioRef.current.set(name, audio);
     }
     audio.currentTime = 0;
@@ -181,6 +203,64 @@ export default function App() {
 
   const socketRef = useWebSocket(handleMessage);
 
+  // ------------------------------------------------------- browser camera
+  const browserStreamsRef = useRef(new Map());
+
+  const stopBrowserCamera = useCallback((cameraId) => {
+    const entry = browserStreamsRef.current.get(cameraId);
+    if (!entry) return;
+    browserStreamsRef.current.delete(cameraId);
+    clearInterval(entry.timer);
+    if (entry.video) {
+      entry.video.srcObject = null;
+      entry.video.remove();
+    }
+  }, []);
+
+  const startBrowserCamera = useCallback(
+    async (cameraId) => {
+      if (browserStreamsRef.current.has(cameraId)) return;
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setStatusMsg("This browser does not allow camera access.");
+        return;
+      }
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: false,
+        });
+      } catch (err) {
+        setStatusMsg(`Camera access was denied: ${err.message}`);
+        return;
+      }
+      const video = document.createElement("video");
+      video.srcObject = stream;
+      video.muted = true;
+      video.playsInline = true;
+      await video.play().catch(() => {});
+      const canvas = document.createElement("canvas");
+      const context = canvas.getContext("2d");
+      const timer = setInterval(async () => {
+        if (!video.videoWidth) return;
+        const width = 640;
+        const height = Math.round((video.videoHeight / video.videoWidth) * width);
+        canvas.width = width;
+        canvas.height = height;
+        context.drawImage(video, 0, 0, width, height);
+        const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.7));
+        if (!blob) return;
+        try {
+          await api.pushFrame(cameraId, blob);
+        } catch {
+          /* the server may be restarting - the next frame retries */
+        }
+      }, 200);
+      browserStreamsRef.current.set(cameraId, { stream, video, timer });
+    },
+    []
+  );
+
   // ------------------------------------------------------------- cameras
   const connectCamera = async () => {
     try {
@@ -193,12 +273,16 @@ export default function App() {
       });
       setCameras((prev) => upsertCamera(prev, result.camera));
       setStatusMsg(`Camera "${result.camera.name}" connected.`);
+      if (result.camera.type === "browser") {
+        startBrowserCamera(result.camera.id);
+      }
     } catch (err) {
       setStatusMsg(err.message);
     }
   };
 
   const disconnectCamera = async (id) => {
+    stopBrowserCamera(id);
     await api.removeCamera(id);
     setCameras((prev) => prev.filter((c) => c.id !== id));
     setHasSignal((prev) => {
@@ -346,7 +430,25 @@ export default function App() {
   };
 
   if (!settings) {
-    return <div className="loading">Loading STUDY TRACKER…</div>;
+    return (
+      <div className="loading">
+        {bootError ? (
+          <>
+            <h2>Cannot reach the Study Tracker server</h2>
+            <p className="muted">{bootError}</p>
+            <p className="muted">
+              Check that the backend is running and that the frontend knows its address
+              (VITE_API_BASE_URL or public/backend.json).
+            </p>
+            <button className="btn primary" onClick={() => setRetryCount((n) => n + 1)}>
+              Retry
+            </button>
+          </>
+        ) : (
+          "Loading STUDY TRACKER…"
+        )}
+      </div>
+    );
   }
 
   const sleepActive = Object.values(eyeStatus).some((s) => s.sleeping);
@@ -377,28 +479,46 @@ export default function App() {
           <section className="panel">
             <h2>CAMERA SOURCE</h2>
             <select value={sourceType} onChange={(e) => setSourceType(e.target.value)}>
-              <option value="webcam">Laptop / USB webcam</option>
+              <option value="browser">Browser camera (this device)</option>
+              <option value="webcam">Laptop / USB webcam (server)</option>
               <option value="rtsp">IP camera (RTSP)</option>
               <option value="file">Video file (test)</option>
             </select>
 
-            <label>
-              {sourceType === "webcam" ? "Camera index or device name" : sourceType === "rtsp" ? "RTSP URL" : "Video file path"}
-            </label>
-            <input
-              value={sourceValue}
-              onChange={(e) => setSourceValue(e.target.value)}
-              placeholder={sourceType === "rtsp" ? "rtsp://192.168.1.100:554/stream1" : "0"}
-            />
-            {sourceType === "webcam" && webcams.length > 0 && (
-              <select className="devices" onChange={(e) => setSourceValue(e.target.value)}>
-                <option value="">detected devices:</option>
-                {webcams.map((device) => (
-                  <option key={device.name} value={device.index}>
-                    {device.index}: {device.name}
-                  </option>
-                ))}
-              </select>
+            {sourceType === "browser" ? (
+              <p className="muted small">
+                Uses the camera of this computer through the browser. Works with a hosted backend.
+              </p>
+            ) : (
+              <>
+                <label>
+                  {sourceType === "webcam"
+                    ? "Camera index or device name"
+                    : sourceType === "rtsp"
+                      ? "RTSP URL"
+                      : "Video file path"}
+                </label>
+                <input
+                  value={sourceValue}
+                  onChange={(e) => setSourceValue(e.target.value)}
+                  placeholder={sourceType === "rtsp" ? "rtsp://192.168.1.100:554/stream1" : "0"}
+                />
+                {sourceType === "webcam" &&
+                  (webcams.length > 0 ? (
+                    <select className="devices" onChange={(e) => setSourceValue(e.target.value)}>
+                      <option value="">detected devices:</option>
+                      {webcams.map((device) => (
+                        <option key={device.name} value={device.index}>
+                          {device.index}: {device.name}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <p className="muted small">
+                      No camera is attached to the server. Use "Browser camera" or an RTSP camera.
+                    </p>
+                  ))}
+              </>
             )}
 
             <label>Camera name (optional)</label>

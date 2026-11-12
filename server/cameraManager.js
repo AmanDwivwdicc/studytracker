@@ -12,6 +12,8 @@ import { ROOT } from "./settings.js";
 
 let cameraCounter = 0;
 
+const IS_WINDOWS = process.platform === "win32";
+
 // ffmpeg rejects unknown query options in an RTSP URL
 // ("Error splitting the argument list: Option not found").
 // Only a few options are supported - everything else is removed here.
@@ -61,10 +63,14 @@ function buildFfmpegArgs(source, opts = {}) {
   const input = source.url;
 
   if (source.type === "webcam") {
-    // Windows cameras are addressed by their DirectShow device name.
-    // Strip a possible "video=" prefix and quotes so ffmpeg can parse it.
     const device = String(input).replace(/^video=/i, "").replace(/"/g, "").trim();
-    args.push("-f", "dshow", "-i", `video=${device}`);
+    if (IS_WINDOWS) {
+      // Windows cameras are addressed by their DirectShow device name.
+      args.push("-f", "dshow", "-i", `video=${device}`);
+    } else {
+      // Linux cameras are exposed as /dev/videoN through Video4Linux2.
+      args.push("-f", "v4l2", "-i", device.startsWith("/dev/") ? device : `/dev/video${device}`);
+    }
   } else {
     if (source.type === "rtsp") {
       const { url, transport, timeout } = sanitizeRtspUrl(input);
@@ -107,6 +113,7 @@ export class Camera extends EventEmitter {
     this._framesInWindow = 0;
     this._stopping = false;
     this._reconnectDelay = 3000;
+    this._failures = 0;
   }
 
   start() {
@@ -119,10 +126,23 @@ export class Camera extends EventEmitter {
     this.status = "connecting";
     this.emit("status", this.publicStatus());
 
+    // Browser cameras are captured in the browser and posted to the server.
+    if (this.source.type === "browser") {
+      this.status = "connected";
+      this.error = "";
+      this.emit("status", this.publicStatus());
+      return;
+    }
+
     let args;
     try {
       const source = { ...this.source };
       if (source.type === "webcam") {
+        if (!IS_WINDOWS && listVideo4LinuxDevices().length === 0) {
+          throw new Error(
+            "This server has no camera attached. Use the browser camera or an RTSP camera."
+          );
+        }
         source.url = await resolveWebcamDevice(source.url);
         this.source.url = source.url;
       }
@@ -158,7 +178,10 @@ export class Camera extends EventEmitter {
       this.status = "reconnecting";
       this.error = this.error || "Stream interrupted";
       this.emit("status", this.publicStatus());
-      setTimeout(() => this._spawn(), this._reconnectDelay);
+      // Back off up to 30 seconds so a broken source does not flood the log.
+      this._failures += 1;
+      const delay = Math.min(this._reconnectDelay * Math.min(this._failures, 5), 30000);
+      setTimeout(() => this._spawn(), delay);
     });  }
 
   _onData(chunk) {
@@ -174,6 +197,16 @@ export class Camera extends EventEmitter {
 
     const frame = this.buffer.subarray(start, end + 2);
     this.buffer = this.buffer.subarray(end + 2);
+    this._emitFrame(frame);
+  }
+
+  // Accept a frame that was captured in the browser.
+  pushBrowserFrame(buffer) {
+    if (!buffer || !buffer.length) return;
+    this._emitFrame(buffer);
+  }
+
+  _emitFrame(frame) {
     this.frame = frame;
     this.frameCount += 1;
     this._framesInWindow += 1;
@@ -188,6 +221,7 @@ export class Camera extends EventEmitter {
     if (this.status !== "connected") {
       this.status = "connected";
       this.error = "";
+      this._failures = 0;
       this.emit("status", this.publicStatus());
     }
     this.emit("frame", frame);
@@ -254,40 +288,67 @@ export class CameraManager {
   }
 }
 
-// Resolve a webcam index to a Windows DirectShow device name for ffmpeg.
+// Resolve a webcam index to a device the ffmpeg build can open.
 export async function listWebcamDevices() {
   const devices = await enumerateWebcams();
   return devices.map((d, index) => ({ index, name: d }));
 }
 
 export async function enumerateWebcams() {
-  if (!ffmpegPath) return [];
-  return new Promise((resolve) => {
-    const proc = spawn(
-      ffmpegPath,
-      ["-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
-      { stdio: ["ignore", "pipe", "pipe"] }
-    );
-    let out = "";
-    proc.stderr.on("data", (chunk) => (out += chunk.toString()));
-    proc.on("close", () => {
-      const devices = [];
-      // ffmpeg prints one line per device:
-      //   [dshow @ ...] "Integrated Camera" (video)
-      for (const line of out.split(/\r?\n/)) {
-        const match = line.match(/"([^"]+)"\s*\(video\)/i);
-        if (match) devices.push(match[1]);
-      }
-      resolve(devices);
+  if (IS_WINDOWS) {
+    if (!ffmpegPath) return [];
+    return new Promise((resolve) => {
+      const proc = spawn(
+        ffmpegPath,
+        ["-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
+        { stdio: ["ignore", "pipe", "pipe"] }
+      );
+      let out = "";
+      proc.stderr.on("data", (chunk) => (out += chunk.toString()));
+      proc.on("close", () => {
+        const devices = [];
+        // ffmpeg prints one line per device:
+        //   [dshow @ ...] "Integrated Camera" (video)
+        for (const line of out.split(/\r?\n/)) {
+          const match = line.match(/"([^"]+)"\s*\(video\)/i);
+          if (match) devices.push(match[1]);
+        }
+        resolve(devices);
+      });
+      proc.on("error", () => resolve([]));
     });
-    proc.on("error", () => resolve([]));
-  });
+  }
+  return listVideo4LinuxDevices();
+}
+
+// Linux exposes cameras as /dev/videoN.
+export function listVideo4LinuxDevices() {
+  try {
+    return fs
+      .readdirSync("/dev")
+      .filter((name) => /^video\d+$/.test(name))
+      .sort((a, b) => Number(a.slice(5)) - Number(b.slice(5)))
+      .map((name) => `/dev/${name}`);
+  } catch {
+    return [];
+  }
 }
 
 // Turn the user input ("0", "Integrated Camera", ...) into a device name.
 export async function resolveWebcamDevice(value) {
-  const devices = await enumerateWebcams();
   const input = String(value ?? "").trim();
+  if (!IS_WINDOWS) {
+    const devices = listVideo4LinuxDevices();
+    if (!input) return devices[0] || "";
+    if (/^\d+$/.test(input)) {
+      const index = Number(input);
+      return devices[index] || devices[0] || `/dev/video${index}`;
+    }
+    if (input.startsWith("/dev/")) return input;
+    const partial = devices.find((d) => d.includes(input));
+    return partial || input;
+  }
+  const devices = await enumerateWebcams();
   if (!input) return devices[0] || "";
   if (/^\d+$/.test(input)) {
     const index = Number(input);
@@ -302,6 +363,9 @@ export async function resolveWebcamDevice(value) {
 
 // Build a capture URL for the given source description.
 export function resolveSourceUrl(type, value, username = "", password = "") {
+  if (type === "browser") {
+    return { type, url: "browser", name: "Browser camera" };
+  }
   if (type === "webcam") {
     const device = String(value?.trim() || "0");
     return { type, url: device, name: `Webcam ${device}` };

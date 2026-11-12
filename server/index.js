@@ -12,7 +12,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { Worker } from "node:worker_threads";
 import { WebSocketServer } from "ws";
-import { CameraManager, listWebcamDevices, resolveSourceUrl, fileExists } from "./cameraManager.js";
+import { CameraManager, listWebcamDevices, resolveSourceUrl, fileExists, enumerateWebcams } from "./cameraManager.js";
 import { AlertEngine } from "./alertEngine.js";
 import { loadSettings, saveSettings, listAudioFiles, ASSETS_DIR, ROOT } from "./settings.js";
 
@@ -23,12 +23,15 @@ const allowedOrigins = new Set(
     .map((origin) => origin.trim())
     .filter(Boolean)
 );
+// When no origin is configured the API stays open, so a split deployment
+// (Vercel frontend + Render backend) works without extra configuration.
+const allowAnyOrigin = allowedOrigins.size === 0;
 
 const app = express();
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (origin && (allowedOrigins.has("*") || allowedOrigins.has(origin))) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
+  if (origin && (allowAnyOrigin || allowedOrigins.has("*") || allowedOrigins.has(origin))) {
+    res.setHeader("Access-Control-Allow-Origin", allowAnyOrigin ? "*" : origin);
     res.setHeader("Vary", "Origin");
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -39,7 +42,7 @@ app.use((req, res, next) => {
   next();
 });
 app.use(express.json({ limit: "25mb" }));
-app.use(express.raw({ type: ["audio/*", "application/octet-stream"], limit: "25mb" }));
+app.use(express.raw({ type: ["audio/*", "application/octet-stream", "image/jpeg"], limit: "25mb" }));
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws" });
@@ -163,9 +166,23 @@ app.get("/api/webcams", async (_req, res) => {
   res.json({ devices });
 });
 
+// Inform the frontend about the capture capabilities of this host.
+app.get("/api/capabilities", async (_req, res) => {
+  const devices = await enumerateWebcams();
+  res.json({
+    platform: process.platform,
+    serverWebcams: devices,
+    browserCamera: true,
+  });
+});
+
 app.post("/api/cameras", (req, res) => {
   const { type, value, name, username, password } = req.body || {};
-  if (!value || !["webcam", "rtsp", "file"].includes(type)) {
+  const validTypes = ["browser", "webcam", "rtsp", "file"];
+  if (!validTypes.includes(type)) {
+    return res.status(400).json({ error: "type must be one of: browser, webcam, rtsp, file" });
+  }
+  if (type !== "browser" && !value) {
     return res.status(400).json({ error: "type and value are required" });
   }
   if (type === "file" && !fileExists(value)) {
@@ -175,10 +192,22 @@ app.post("/api/cameras", (req, res) => {
     return res.status(400).json({ error: "The RTSP URL has to start with rtsp://" });
   }
 
-  const source = resolveSourceUrl(type, value, username || "", password || "");
+  const source = resolveSourceUrl(type, value || "", username || "", password || "");
   if (name) source.name = name;
   const camera = cameraManager.add(source);
   res.json({ camera: camera.publicStatus() });
+});
+
+// Frames captured in the browser are posted here so a hosted backend can run
+// the phone detection on the user's laptop camera.
+app.post("/api/cameras/:id/frame", (req, res) => {
+  const camera = cameraManager.get(req.params.id);
+  if (!camera) return res.status(404).json({ error: "Camera not found" });
+  if (!req.body || !req.body.length) {
+    return res.status(400).json({ error: "No image data received." });
+  }
+  camera.pushBrowserFrame(req.body);
+  res.json({ ok: true, frameCount: camera.frameCount });
 });
 
 app.delete("/api/cameras/:id", (req, res) => {
