@@ -23,6 +23,9 @@
     "rtsp"
   ],
   "license": "MIT",
+  "engines": {
+    "node": ">=20.19.0"
+  },
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.2.2",
     "express": "^5.3.0",

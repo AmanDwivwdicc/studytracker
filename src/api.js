@@ -1,5 +1,8 @@
 // Small helper around the REST API of the Study Tracker server.
-const API = "/api";
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
+const API = `${API_BASE}/api`;
+
+export const assetBaseUrl = API_BASE;
 
 async function request(path, options = {}) {
   const response = await fetch(`${API}${path}`, {

@@ -1,1 +1,25 @@
-node_modules
+# Node.js dependencies and build output
+node_modules/
+dist/
+
+# Python virtual environments and generated caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# Local logs and environment files
+*.log
+.env
+.env.*
+!.env.example
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

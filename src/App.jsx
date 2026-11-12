@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "./api.js";
+import { api, assetBaseUrl } from "./api.js";
 import { loadFaceLandmarker, SleepTracker } from "./faceDetection.js";
 
 const LEVEL_COLOR = { green: "#3cc85a", yellow: "#f2c744", red: "#f23c3c" };
@@ -23,8 +23,10 @@ function useWebSocket(onMessage) {
     let retry;
 
     const connect = () => {
+      const configuredUrl = import.meta.env.VITE_WS_BASE_URL;
       const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-      const socket = new WebSocket(`${protocol}://${window.location.host}/ws`);
+      const socketUrl = configuredUrl || `${protocol}://${window.location.host}/ws`;
+      const socket = new WebSocket(socketUrl);
       socket.binaryType = "arraybuffer";
       socket.onmessage = (event) => {
         if (typeof event.data === "string") {
@@ -115,7 +117,7 @@ export default function App() {
     if (!name) return;
     let audio = audioRef.current.get(name);
     if (!audio) {
-      audio = new Audio(`/assets/${encodeURIComponent(name)}`);
+      audio = new Audio(`${assetBaseUrl}/assets/${encodeURIComponent(name)}`);
       audioRef.current.set(name, audio);
     }
     audio.currentTime = 0;

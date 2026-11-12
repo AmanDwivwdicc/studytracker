@@ -1,7 +1,7 @@
-Model weights are downloaded automatically on the first start and stored here:
+Model files used by the web application:
 
-    face_landmarker.task   MediaPipe face landmarks (~3.6 MB)
-    yolo11n.pt             YOLO nano weights for the phone detection (~5.4 MB)
+    face_landmarker.task   MediaPipe Face Landmarker model loaded in the browser
+    yolo11n.onnx          YOLO11-nano ONNX model loaded by ONNX Runtime in Node.js
+    yolo11n.onnx.data     External data required by yolo11n.onnx
 
-Both files are required only once - after the download the application runs
-completely offline. Delete a file to let it be downloaded again.
+Keep these files with their corresponding model file. The ONNX model and its external data file must remain in the same directory.

@@ -17,8 +17,27 @@ import { AlertEngine } from "./alertEngine.js";
 import { loadSettings, saveSettings, listAudioFiles, ASSETS_DIR, ROOT } from "./settings.js";
 
 const PORT = Number(process.env.PORT) || 5174;
+const allowedOrigins = new Set(
+  (process.env.ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean)
+);
 
 const app = express();
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && (allowedOrigins.has("*") || allowedOrigins.has(origin))) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  }
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+  next();
+});
 app.use(express.json({ limit: "25mb" }));
 app.use(express.raw({ type: ["audio/*", "application/octet-stream"], limit: "25mb" }));
 
